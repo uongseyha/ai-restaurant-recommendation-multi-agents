@@ -4,6 +4,8 @@ import json
 import os
 from dotenv import load_dotenv
 import time
+from pydantic import BaseModel, Field, ValidationError
+from typing import List, Optional
 
 # IBM WatsonX imports
 from ibm_watsonx_ai import Credentials
@@ -80,7 +82,157 @@ def safe_llm_call(system_msg, prompt_txt, retries=3):
             time.sleep(2)
     return "Failed after retries"
 
+### Test the function with a system message and a prompt
 system_msg = "You are a helpful assistant."
 prompt_txt = "Which place is warmer in winter? Hawaii or Greenland?"
-print(safe_llm_call(system_msg, prompt_txt))
+#print(safe_llm_call(system_msg, prompt_txt))
 #print(llm_model(system_msg, prompt_txt))
+
+EXAMPLE_RESTAURANT_PARAGRAPH = restaurant_list[1] #use the second restaurant paragraph as the example
+EXAMPLE_OUTPUT = """
+    {{
+    "name": "Mar de Cortez",
+    "location": "Santa Monica",
+    "type": "casual taqueria",
+    "food_style": "Baja-style seafood",
+    "rating": 4.2,
+    "price_range": 1,
+    "signatures": [
+        "beer-battered snapper tacos",
+        "zesty octopus ceviche"
+    ],
+    "vibe": "salt-air energy",
+    "environment": "a premier sun-drenched spot for open-air dining near the pier."
+    "shortcomings": []
+    }}
+"""
+
+def restaurant_data_structure_prompt_generation(restaurant_paragraph):
+    base_system_msg = f"""
+    You are a helpful assistant who extracts structured information about restaurants from unstructured text.
+    """
+    
+    base_user_prompt = f"""
+    Task:
+    Given a restaurant description, extract the following information and present it in a structured JSON format:
+    - name: The name of the restaurant
+    - location: The location of the restaurant
+    - type: The type of the restaurant
+    - food_style: The style of food served
+    - rating: The rating of the restaurant
+    - price_range: The price range of the restaurant
+    - signatures: A list of signature dishes
+    - vibe: The vibe of the restaurant
+    - environment: The environment of the restaurant
+    - shortcomings: A list of shortcomings
+
+    Restaurant description:
+    {restaurant_paragraph}
+
+    Example:
+    Input Restaurant Description: {EXAMPLE_RESTAURANT_PARAGRAPH}
+    Output:
+    {EXAMPLE_OUTPUT}
+    
+    """
+    return base_system_msg, base_user_prompt
+
+# Unit test:
+restaurant_paragraph = restaurant_list[0]
+base_system_msg, base_user_prompt = restaurant_data_structure_prompt_generation(restaurant_paragraph=restaurant_paragraph)
+
+test_response = llm_model(system_msg=base_system_msg, prompt_txt=base_user_prompt)
+print(test_response)
+
+# Validation
+### 3.1. Define the schema
+class Restaurant(BaseModel):
+    name: str
+    location: str
+    type: str
+    food_style: str
+    rating: Optional[float] = None
+    price_range: Optional[int] = None
+    signatures: List[str] = Field(default_factory=list)
+    vibe: Optional[str] = None
+    environment: str
+    shortcomings: List[str] = Field(default_factory=list)
+
+
+### 3.2. Use the validation method to validate the test_response from the unit test
+try:
+    restaurant_data = Restaurant.model_validate_json(test_response)
+    print(f"Success! Validated: {restaurant_data.name}")
+except ValidationError as e:
+    print(f"Validation failed: {e.json()}")
+
+#### 3.3: If the validation fails, generate the auto-repair prompts based on the error message and the candidate JSON output
+def JSON_auto_repair_prompts(candidate_json_output, error_message):
+    auto_repair_system_msg = """
+    You are a helpful assistant who corrects the JSON output based on the error message from the validation.
+    """
+    auto_repair_prompt = f"""
+    The following JSON output is invalid:
+    {candidate_json_output}
+
+    Error message:
+    {error_message}
+
+    Please correct the JSON output according to the error message.
+    """
+    return auto_repair_system_msg, auto_repair_prompt
+
+# You will structure each restaurant description paragraph into a JSON-formatted output by iterating through the dataset using a for loop.
+# Although using an LLM to auto repair the response format is not the best practice, here you are guaranteed that the generation and repair tasks here are simple enough for LLMs to accomplish.
+# Performance note: validate locally first, only re-call the LLM on invalid JSON, and bound repair retries.
+structured_restaurant_lists = []
+failed_restaurants = []
+for i, restaurant_paragraph in enumerate(restaurant_list):
+    ### 2.1: Produce your initial output
+    system_msg, user_prompt = restaurant_data_structure_prompt_generation(restaurant_paragraph)
+    candidate_response = safe_llm_call(system_msg, user_prompt)
+
+    ### 2.2: Validation and Auto Correction loop on the output (Hint: while loop)
+    max_repair_rounds = 2
+    repair_attempt = 0
+    restaurant_data = None
+    while repair_attempt <= max_repair_rounds:
+        try:
+            restaurant_data = Restaurant.model_validate_json(candidate_response)
+            break
+        except ValidationError as e:
+            if repair_attempt == max_repair_rounds:
+                #print(f"Warning: validation failed for restaurant index {i} after {repair_attempt + 1} attempts")
+                failed_restaurants.append(i)
+                break
+            error_message = e.json()
+            auto_repair_system_msg, auto_repair_prompt = JSON_auto_repair_prompts(candidate_response, error_message)
+            candidate_response = safe_llm_call(auto_repair_system_msg, auto_repair_prompt)
+            repair_attempt += 1
+
+    ### 2.3: Append your finalized response to the structured_restaurant_lists
+    if restaurant_data is not None:
+        structured_restaurant_lists.append(restaurant_data.model_dump())
+
+    # A manual progress bar
+    if (i+1) % 20 == 0:
+        print(f'{i+1} out of {len(restaurant_list)} is done')
+
+# A final message to notify the completion
+print('ALL DONE!!')
+
+### Print the 50th item in the structured_restaurant_lists
+print(structured_restaurant_lists[49])
+
+#For each item in the restaurant list, assign it with an itemId to be consistent with the one in the user review data:
+structured_restaurant_lists_json = structured_restaurant_lists
+
+# For each item in the restaurant list, assign it with an itemId
+for i, response in enumerate(structured_restaurant_lists_json):
+    response['itemId'] = 1000001 + i
+    structured_restaurant_lists_json[i] = response
+
+filename = 'structured_restaurant_data.json'
+
+with open(filename, 'w', encoding='utf-8') as f:
+    json.dump(structured_restaurant_lists_json, f, indent=4)
