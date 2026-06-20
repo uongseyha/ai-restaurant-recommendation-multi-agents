@@ -34,6 +34,12 @@ chroma_db/
 # Logs
 *.log
 
+# Large lab assets (keep locally; download from course materials)
+module1/lab2/data/synthetic-recipe-images.zip
+module1/lab2/l1m2-doc.zip
+module1/lab2/data/synthetic_recipe_images/
+module1/lab2/synthetic_recipe_images/
+
 # OS
 .DS_Store
 Thumbs.db
